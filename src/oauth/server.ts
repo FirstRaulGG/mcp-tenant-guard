@@ -263,6 +263,10 @@ export async function approveAuthorization(guard: Guard, request: AuthorizeReque
   if (scopes.length === 0 || scopes.length !== approval.scopes.length) {
     return refuse("invalid_scopes", "Choose at least one permission.");
   }
+  // A client that named the scopes it wants gets no more than those, whatever the form says.
+  if (request.requestedScopes.length > 0 && !scopes.every((scope) => request.requestedScopes.includes(scope))) {
+    return refuse("invalid_scopes", "The application did not ask for one of these permissions.");
+  }
 
   let tenantId: string | null = null;
   if (approval.kind === "advisor") {
@@ -307,8 +311,18 @@ export async function approveAuthorization(guard: Guard, request: AuthorizeReque
   return { ok: true, location: redirectWith(oauth, request.redirectUri, { code: secret, state: request.state }) };
 }
 
-export function denyAuthorization(guard: Guard, request: AuthorizeRequest): string {
-  return redirectWith(requireOAuth(guard), request.redirectUri, {
+/**
+ * Where to send the browser when the person declines. Null when the request no longer checks out:
+ * an `AuthorizeRequest` is a plain object that travelled through a form, so it is verified again
+ * before anything is redirected to it.
+ */
+export async function denyAuthorization(guard: Guard, request: AuthorizeRequest): Promise<string | null> {
+  const oauth = requireOAuth(guard);
+  const client = await oauth.store.getClient(request.clientId);
+  if (!client || !client.redirectUris.includes(request.redirectUri) || !isAllowedRedirect(oauth.redirects, request.redirectUri)) {
+    return null;
+  }
+  return redirectWith(oauth, request.redirectUri, {
     error: "access_denied",
     error_description: "The request was declined",
     state: request.state,
@@ -357,21 +371,20 @@ async function exchangeCode(guard: Guard, oauth: OAuthConfig, params: Readonly<R
   if (!stored || stored.clientId !== client.id) return invalidGrant();
 
   const now = guard.now();
+  // Proof first. Someone who only saw the code (in a browser history, a log) and cannot produce
+  // the verifier gets a plain refusal, and no power to sign the person out.
+  if (stored.redirectUri !== redirectUri || stored.resource !== oauth.resource || !verifyPkce(verifier, stored.codeChallenge)) {
+    return invalidGrant();
+  }
   if (stored.consumedAt) {
-    // A code presented twice was seen by two parties. Whoever was first holds tokens that may not
-    // be theirs, so those go too.
+    // The right verifier with a used code: the same exchange was made twice, so the code and its
+    // verifier were both seen by a second party. The tokens issued the first time go too.
     await oauth.store.revokeFamily(stored.id, now);
     return invalidGrant();
   }
-  if (
-    stored.expiresAt.getTime() <= now.getTime() ||
-    stored.redirectUri !== redirectUri ||
-    stored.resource !== oauth.resource ||
-    !verifyPkce(verifier, stored.codeChallenge)
-  ) {
-    return invalidGrant();
-  }
-  // Compare-and-swap: of two requests racing with the same code, one gets tokens.
+  if (stored.expiresAt.getTime() <= now.getTime()) return invalidGrant();
+  // Compare-and-swap: of two requests racing with the same code, one gets tokens. The loser is
+  // simply refused; the family is revoked only when a used code comes back later.
   if (!(await oauth.store.consumeCode(stored.id, now))) return invalidGrant();
 
   return { ok: true, body: await issueGrant(guard, oauth, { ...stored, familyId: stored.id }) };
@@ -402,8 +415,9 @@ async function refresh(guard: Guard, oauth: OAuthConfig, params: Readonly<Record
     return invalidGrant();
   }
   if (grant.revokedAt || grant.refreshExpiresAt.getTime() <= now.getTime()) return invalidGrant();
-  // Of two requests racing with the same token, one wins. The loser is told to stop; the family is
-  // kept, because a client retrying a dropped connection is not an attack.
+  // Of two requests racing with the same token, one wins and the loser is refused. A retry that
+  // arrives AFTER the winner finished is indistinguishable from theft and is treated as one above:
+  // a client that lost the response has to sign in again.
   if (!(await oauth.store.rotateGrant(grant.id, now))) return invalidGrant();
 
   return { ok: true, body: await issueGrant(guard, oauth, grant) };
@@ -487,8 +501,15 @@ export async function listConnections(guard: Guard, userId: string): Promise<Con
   });
 }
 
-/** Revokes a connection of this user. Someone else's id answers `not_found`, like a missing one. */
+/**
+ * Revokes a connection of this user: every token of that sign-in, not just the pair whose id was
+ * listed. The id changes each time the client refreshes, so an id read a minute ago may already
+ * name a retired pair, and revoking only that would leave the connection alive.
+ * Someone else's id answers `not_found`, like a missing one.
+ */
 export async function revokeConnection(guard: Guard, userId: string, grantId: string): Promise<RevokeResult> {
   if (!guard.oauth) return "not_found";
-  return guard.oauth.store.revokeGrant(grantId, userId, guard.now());
+  const grant = (await guard.oauth.store.listGrants(userId)).find((candidate) => candidate.id === grantId);
+  if (!grant) return "not_found";
+  return (await guard.oauth.store.revokeFamily(grant.familyId, guard.now())) > 0 ? "revoked" : "already_revoked";
 }

@@ -166,7 +166,7 @@ describe("consent", () => {
 
   it("reports a refusal back to the client", async () => {
     const h = harbor();
-    const location = new URL(denyAuthorization(h.guard, await authorizeRequest(h, await client(h))));
+    const location = new URL((await denyAuthorization(h.guard, await authorizeRequest(h, await client(h))))!);
     expect(location.searchParams.get("error")).toBe("access_denied");
     expect(location.searchParams.get("state")).toBe("st-123");
   });

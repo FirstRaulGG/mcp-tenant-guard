@@ -14,7 +14,9 @@ import { TENANTS } from "./world.js";
 
 const PORT = Number(process.env.PORT ?? 8787);
 const ORIGIN = `http://localhost:${PORT}`;
-const harbor = createHarbor({ origin: ORIGIN });
+// Bound to 127.0.0.1 with no proxy in front, so there is no forwarding header to trust: every
+// caller is the local machine.
+const harbor = createHarbor({ origin: ORIGIN, clientIp: () => "127.0.0.1" });
 
 /** Who you can pretend to be on the consent page. */
 const PEOPLE = [
@@ -44,7 +46,10 @@ async function authorizePage(request: Request): Promise<Response> {
   }
 
   if (request.method === "POST") {
-    if (params.get("decision") !== "allow") return Response.redirect(denyAuthorization(harbor.guard, check.request), 302);
+    if (params.get("decision") !== "allow") {
+      const back = await denyAuthorization(harbor.guard, check.request);
+      return back ? Response.redirect(back, 302) : page("Cannot continue", "<h1>Cannot continue</h1><p>This sign-in request is no longer valid.</p>");
+    }
     const person = PEOPLE.find((p) => p.id === params.get("person"));
     if (!person) return page("Cannot continue", "<h1>Cannot continue</h1><p>Choose who you are.</p>");
     const result = await approveAuthorization(harbor.guard, check.request, {

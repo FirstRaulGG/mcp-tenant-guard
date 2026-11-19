@@ -58,28 +58,56 @@ export const DEFAULT_LIMITS: GuardLimits = {
 /**
  * Sliding-window limiter held in memory. Correct for one process. Behind several instances each
  * one counts alone, so the effective limit is multiplied: use a shared store there.
+ *
+ * Keys whose window has passed are dropped as it goes, so memory follows the number of callers
+ * active in the last window, not the number ever seen.
  */
 export class MemoryRateLimiter implements RateLimiter {
-  private readonly hits = new Map<string, { at: number; cost: number }[]>();
+  private readonly hits = new Map<string, { windowMs: number; entries: { at: number; cost: number }[] }>();
+  private calls = 0;
 
-  constructor(private readonly now: () => number = Date.now) {}
+  constructor(
+    private readonly now: () => number = Date.now,
+    /** How many `consume` calls between sweeps of idle keys. */
+    private readonly sweepEvery = 500,
+  ) {}
+
+  /** Number of keys currently held. For tests and monitoring. */
+  get size(): number {
+    return this.hits.size;
+  }
+
+  private sweep(now: number): void {
+    for (const [key, bucket] of this.hits) {
+      const last = bucket.entries[bucket.entries.length - 1];
+      if (!last || last.at <= now - bucket.windowMs) this.hits.delete(key);
+    }
+  }
 
   async consume(charges: readonly LimitCharge[]): Promise<LimitDecision> {
     const now = this.now();
+    if ((this.calls += 1) % this.sweepEvery === 0) this.sweep(now);
     let retryAfterMs = 0;
 
     for (const { key, rule, cost = 1 } of charges) {
-      const recent = (this.hits.get(key) ?? []).filter((hit) => hit.at > now - rule.windowMs);
-      this.hits.set(key, recent);
+      // A cost that is not a positive number would compare false against every limit.
+      if (!Number.isFinite(cost) || cost <= 0) throw new Error("a rate-limit cost must be a positive number");
+      const recent = (this.hits.get(key)?.entries ?? []).filter((hit) => hit.at > now - rule.windowMs);
       const used = recent.reduce((sum, hit) => sum + hit.cost, 0);
       if (used + cost > rule.limit) {
         const oldest = recent[0]?.at ?? now;
         retryAfterMs = Math.max(retryAfterMs, oldest + rule.windowMs - now, 1000);
       }
+      if (recent.length > 0) this.hits.set(key, { windowMs: rule.windowMs, entries: recent });
+      else this.hits.delete(key);
     }
     if (retryAfterMs > 0) return { allowed: false, retryAfterSeconds: Math.ceil(retryAfterMs / 1000) };
 
-    for (const { key, cost = 1 } of charges) this.hits.get(key)!.push({ at: now, cost });
+    for (const { key, rule, cost = 1 } of charges) {
+      const bucket = this.hits.get(key) ?? { windowMs: rule.windowMs, entries: [] };
+      bucket.entries.push({ at: now, cost });
+      this.hits.set(key, bucket);
+    }
     return { allowed: true, retryAfterSeconds: 0 };
   }
 }

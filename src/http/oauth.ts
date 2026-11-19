@@ -18,6 +18,7 @@ export interface OAuthHandlerOptions {
   clientIp?: (request: Request) => string | null;
 }
 
+const MAX_BODY_BYTES = 100_000;
 const NO_STORE = { "cache-control": "no-store", pragma: "no-cache" };
 
 function json(status: number, body: unknown, headers: Record<string, string> = {}): Response {
@@ -29,14 +30,16 @@ const notFound = () => new Response(null, { status: 404, headers: NO_STORE });
 async function readParams(request: Request): Promise<Record<string, string> | null> {
   try {
     const type = request.headers.get("content-type") ?? "";
+    const text = await request.text();
+    if (text.length > MAX_BODY_BYTES) return null;
     if (type.includes("application/json")) {
-      const body: unknown = await request.json();
+      const body: unknown = JSON.parse(text);
       if (!body || typeof body !== "object" || Array.isArray(body)) return null;
       const params: Record<string, string> = {};
       for (const [key, value] of Object.entries(body)) if (typeof value === "string") params[key] = value;
       return params;
     }
-    return Object.fromEntries(new URLSearchParams(await request.text()));
+    return Object.fromEntries(new URLSearchParams(text));
   } catch {
     return null;
   }
@@ -69,17 +72,23 @@ export function createOAuthHandler(guard: Guard, options: OAuthHandlerOptions = 
     }
 
     if (request.method !== "POST") return json(405, { error: "method not allowed" }, { allow: "POST" });
-    const ip = options.clientIp?.(request) ?? "unknown";
-
     // The limit is consumed before the body is read: a rejected request costs nothing to parse.
+    // Without a client IP there is one bucket for everybody. That is kept here, unlike on the MCP
+    // endpoint: these two endpoints take no credential, so the choice is a shared limit or none.
+    const ip = options.clientIp?.(request) ?? "shared";
     const rule = isRegister ? guard.limits.registrationPerIp : guard.limits.tokenEndpointPerIp;
     const limit = await guard.limiter.consume([{ key: `${isRegister ? "register" : "token"}:${ip}`, rule }]);
     if (!limit.allowed) return json(429, { error: "too_many_requests" }, { "retry-after": String(limit.retryAfterSeconds) });
 
+    const declared = Number(request.headers.get("content-length") ?? 0);
+    if (declared > MAX_BODY_BYTES) return json(413, { error: "invalid_request", error_description: "The body is too large." });
+
     if (isRegister) {
       let body: unknown;
       try {
-        body = await request.json();
+        const text = await request.text();
+        if (text.length > MAX_BODY_BYTES) throw new Error("too large");
+        body = JSON.parse(text);
       } catch {
         return json(400, { error: "invalid_client_metadata", error_description: "The body must be JSON." });
       }

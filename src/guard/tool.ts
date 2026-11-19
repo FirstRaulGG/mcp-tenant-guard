@@ -3,10 +3,12 @@
 // A tool author writes the part that reads or changes data. Everything that must not be forgotten
 // happens around it, in a fixed order, in one place:
 //
-//   budget -> visibility -> scope -> cost -> tenant -> audit (open) -> handler -> sanitize -> size
-//   -> audit (close)
+//   budget -> arguments -> visibility -> scope -> cost -> tenant -> audit (open) -> handler
+//   -> sanitize -> size -> audit (close)
 //
-// A tool cannot skip a step, because it never sees the request before the steps have run.
+// A handler never sees a request before those steps have run. What the wrapper cannot do is check
+// that a tool told the truth about itself: a tool declared as a read that writes anyway, or one
+// that ignores the tenant it was handed, is not caught here. Declarations are reviewed by people.
 
 import { z } from "zod";
 
@@ -15,7 +17,7 @@ import { auditParams, pickLoggable } from "../core/audit.js";
 import type { NewAuditEntry } from "../core/audit.js";
 import { ToolError, TOOL_HINTS, TOOL_STATUSES, enforceResultSize, errorResult, okResult, statusOf } from "../core/result.js";
 import type { ToolEffect, ToolResult, ToolStatus } from "../core/result.js";
-import { sanitizeLeaves, withDataNotice } from "../core/sanitize.js";
+import { sanitizeLeaves, sanitizeText, withDataNotice } from "../core/sanitize.js";
 import { hasScope } from "../core/scopes.js";
 import { resolveTarget } from "../core/tenant.js";
 import type { AccessMode, Target } from "../core/tenant.js";
@@ -38,11 +40,10 @@ export interface ToolDefinition<Shape extends z.ZodRawShape = z.ZodRawShape> {
   description: string;
   /** Arguments, without `tenantId`: the guard adds and resolves it. */
   input: Shape;
-  /** Scope the credential must hold. Null for a tool that touches no tenant data. */
+  /** Scope the credential must hold. Null only for a tool that touches no tenant data. */
   scope: string | null;
+  /** What the tool does. Decides the hints, the kind of scope it needs and who may see it. */
   effect: ToolEffect;
-  /** How the tenant is accessed. Defaults from `effect`. */
-  access?: AccessMode;
   /** Set to false for a tool that is not about one tenant, such as listing them. */
   tenant?: boolean;
   /** Restricts the tool to some kinds of actor. Default: all. */
@@ -64,8 +65,21 @@ export function defineTool<Shape extends z.ZodRawShape>(tool: ToolDefinition<Sha
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type AnyTool = ToolDefinition<any>;
 
+/**
+ * The guard's own tools that change nothing but the guard's records (runs). They are the only
+ * tools allowed to write without a write scope, and a tool cannot put itself on this list.
+ */
+const BOOKKEEPING = new WeakSet<object>();
+
+/** @internal */
+export function markBookkeeping<T extends AnyTool>(tool: T): T {
+  BOOKKEEPING.add(tool);
+  return tool;
+}
+
+/** How the tool touches the tenant. Follows from its effect; a tool cannot declare it separately. */
 export function accessOf(tool: AnyTool): AccessMode {
-  if (tool.access) return tool.access;
+  if (BOOKKEEPING.has(tool)) return "read";
   if (tool.effect === "write" || tool.effect === "overwrite") return "write";
   return tool.effect === "propose" ? "propose" : "read";
 }
@@ -80,6 +94,8 @@ export function assertTools(guard: Guard, tools: readonly AnyTool[]): void {
     if ("tenantId" in tool.input) throw new Error(`${tool.name}: tenantId is added by the guard, do not declare it`);
     if (tool.scope === null) {
       if (tool.tenant !== false) throw new Error(`${tool.name}: a tool that reads a tenant needs a scope`);
+      // Without a scope there is nothing to say who may change things, so nothing may be changed.
+      if (accessOf(tool) !== "read") throw new Error(`${tool.name}: a tool without a scope must be a read`);
       continue;
     }
     const nature = guard.scopes.natureOf(tool.scope);
@@ -126,13 +142,61 @@ function isToolStatus(status: number): status is ToolStatus {
   return (TOOL_STATUSES as readonly number[]).includes(status);
 }
 
-function abortRace<T>(work: Promise<T>, signal: AbortSignal, onAbort: () => ToolError): Promise<T> {
+/**
+ * Starts the work unless time is already up, and stops waiting for it when time runs out.
+ *
+ * The work is STARTED here, after the check, never before: a handler that begins once the caller
+ * has been told "timed out" is a write nobody is waiting for. Work that is abandoned mid-flight
+ * keeps its rejection handler, so a late failure is ignored instead of crashing the process.
+ */
+function abortRace<T>(start: () => Promise<T>, signal: AbortSignal, onAbort: () => ToolError): Promise<T> {
   return new Promise<T>((resolve, reject) => {
+    if (signal.aborted) return reject(onAbort());
     const stop = () => reject(onAbort());
-    if (signal.aborted) return stop();
     signal.addEventListener("abort", stop, { once: true });
+    let work: Promise<T>;
+    try {
+      work = start();
+    } catch (err) {
+      signal.removeEventListener("abort", stop);
+      return reject(err);
+    }
     work.then(resolve, reject).finally(() => signal.removeEventListener("abort", stop));
   });
+}
+
+function auditEntry(guard: Guard, context: RequestContext, tool: string, tenantId: string | null, params: Record<string, unknown>): NewAuditEntry {
+  const { actor } = context;
+  return {
+    at: guard.now(),
+    credentialId: actor.credentialId,
+    userId: actor.userId,
+    actorKind: actor.kind,
+    agentName: actor.agentName,
+    tenantId,
+    tool,
+    params: auditParams(params),
+    traceId: context.traceId,
+    runId: context.runId,
+  };
+}
+
+/**
+ * Leaves a durable trace of a call that was refused before it ran. The refusal stands whether or
+ * not it could be recorded, but a failure to record it is reported: a lost refusal is a blind spot.
+ */
+export async function recordRefusal(
+  guard: Guard,
+  context: RequestContext,
+  refusal: { tool: string; tenantId: string | null; status: number; params?: Record<string, unknown> },
+): Promise<void> {
+  const tool = sanitizeText(refusal.tool, { maxLength: 64 });
+  const tenantId = refusal.tenantId === null ? null : sanitizeText(refusal.tenantId, { maxLength: 200 });
+  try {
+    await guard.audit.denied({ ...auditEntry(guard, context, tool, tenantId, refusal.params ?? {}), status: refusal.status });
+  } catch (err) {
+    guard.emit({ type: "audit_denied_failed", traceId: context.traceId, detail: { tool, status: refusal.status, error: String(err) } });
+  }
 }
 
 /** Runs one tool call through every check. Never throws: a failure is a result. */
@@ -142,75 +206,65 @@ export async function executeTool(guard: Guard, context: RequestContext, tool: A
   const access = accessOf(tool);
   let auditId: string | null = null;
   let requestedTenant: string | null = null;
+  let loggable: Record<string, unknown> = {};
   let result: ToolResult;
 
-  const entry = (tenantId: string | null, params: Record<string, unknown>): NewAuditEntry => ({
-    at: guard.now(),
-    credentialId: actor.credentialId,
-    userId: actor.userId,
-    actorKind: actor.kind,
-    agentName: actor.agentName,
-    tenantId,
-    tool: tool.name,
-    params: auditParams(params),
-    traceId,
-    runId: context.runId,
-  });
-
-  /** Refuses the call and leaves a durable trace of the attempt. */
-  const deny = async (status: 403 | 404, message: string): Promise<never> => {
-    try {
-      await guard.audit.denied({ ...entry(requestedTenant, {}), status });
-    } catch {
-      // The refusal stands whether or not it could be recorded.
-    }
-    throw new ToolError(status, message);
+  /** Refuses the call before it ran, on the record. */
+  const refuse = async (status: ToolStatus, message: string): Promise<ToolError> => {
+    await recordRefusal(guard, context, { tool: tool.name, tenantId: requestedTenant, status, params: loggable });
+    return new ToolError(status, message);
   };
 
   try {
     // One request can batch several calls, and the budget belongs to the request: once it is
     // spent, the remaining calls do not start.
-    if (signal.aborted) throw new ToolError(504, "The request ran out of time before this call started.");
+    if (signal.aborted) throw await refuse(504, "The request ran out of time before this call started.");
 
     const parsed = z.object(inputShape(tool)).safeParse(rawArgs ?? {});
-    if (!parsed.success) throw new ToolError(400, `Invalid arguments: ${parsed.error.issues[0]?.message ?? "check the input"}`);
+    if (!parsed.success) throw await refuse(400, `Invalid arguments: ${parsed.error.issues[0]?.message ?? "check the input"}`);
     const args = parsed.data as Record<string, unknown>;
-    requestedTenant = typeof args.tenantId === "string" ? args.tenantId.slice(0, 200) : null;
+    requestedTenant = typeof args.tenantId === "string" ? args.tenantId : null;
+    loggable = pickLoggable(args, tool.audit ?? []);
 
     // Checked again here although hidden tools are not listed: the list is a courtesy, this is
     // the control.
     if (!isVisible(guard, actor, tool)) {
-      await deny(403, tool.scope && !hasScope(guard.scopes, actor.scopes, tool.scope)
-        ? `This credential lacks the scope ${tool.scope}.`
-        : "This credential cannot use this tool.");
+      throw await refuse(
+        403,
+        tool.scope && !hasScope(guard.scopes, actor.scopes, tool.scope)
+          ? `This credential lacks the scope ${tool.scope}.`
+          : "This credential cannot use this tool.",
+      );
     }
 
     const cost = typeof tool.cost === "function" ? tool.cost(args) : (tool.cost ?? 1);
+    // A cost that is not a positive number would switch the limit off, or pay the caller back.
+    if (!Number.isFinite(cost) || cost <= 0) throw new Error(`tool ${tool.name} computed an invalid cost`);
     const charge = await guard.limiter.consume([
       { key: `cost:credential:${actor.credentialId}`, rule: guard.limits.costPerCredential, cost },
       // Keyed by kind as well, so a looping agent cannot spend its delegator's own budget.
       { key: `cost:user:${actor.kind}:${actor.userId}`, rule: guard.limits.costPerUser, cost },
     ]);
-    if (!charge.allowed) throw new ToolError(429, `Usage limit reached. Try again in ${charge.retryAfterSeconds} seconds.`);
+    if (!charge.allowed) throw await refuse(429, `Usage limit reached. Try again in ${charge.retryAfterSeconds} seconds.`);
 
     let target: Target | null = null;
     if (tool.tenant !== false) {
       const decision = await resolveTarget(actor, requestedTenant, access, guard.directory);
-      if (!decision.ok) await deny(decision.status, decision.message);
-      else target = decision.target;
+      if (!decision.ok) throw await refuse(decision.status, decision.message);
+      target = decision.target;
     }
 
     // The row exists BEFORE the data is touched. If it cannot be written, nothing is read: there
     // is no access without a record of it.
     try {
-      auditId = await guard.audit.open(entry(target?.tenantId ?? null, pickLoggable(args, tool.audit ?? [])));
+      auditId = await guard.audit.open(auditEntry(guard, context, tool.name, target?.tenantId ?? null, loggable));
     } catch {
       throw new ToolError(503, "The audit log is unavailable, so the call was not run. Try again shortly.");
     }
 
     const toolArgs = Object.fromEntries(Object.entries(args).filter(([key]) => key !== "tenantId"));
     const payload = await abortRace(
-      tool.handler({ args: toolArgs, actor, target, traceId, runId: context.runId, signal }),
+      () => tool.handler({ args: toolArgs, actor, target, traceId, runId: context.runId, signal }),
       signal,
       () =>
         new ToolError(
@@ -247,7 +301,14 @@ export async function executeTool(guard: Guard, context: RequestContext, tool: A
   guard.emit({
     type: "tool",
     traceId,
-    detail: { tool: tool.name, credentialId: actor.credentialId, userId: actor.userId, tenantId: requestedTenant, status, durationMs },
+    detail: {
+      tool: tool.name,
+      credentialId: actor.credentialId,
+      userId: actor.userId,
+      tenantId: requestedTenant === null ? null : sanitizeText(requestedTenant, { maxLength: 200 }),
+      status,
+      durationMs,
+    },
   });
   return result;
 }

@@ -71,6 +71,7 @@ export async function runDemo(): Promise<{ output: string; failures: number }> {
   say(`  tools on offer: ${(await nell.toolNames()).join(", ")}`);
   const obeyed = await nell.call("set_order_status", { orderId: "F-1001", status: "shipped" });
   check("set_order_status is not on offer, and calling it anyway fails", obeyed.isError);
+  check("the attempt is in the audit log", harbor.audit.entries.some((e) => e.tool === "set_order_status" && e.outcome === "denied"));
   check("no order changed", harbor.world.orders.shop_fernhill!.find((o) => o.id === "F-1003")!.status === "new");
 
   // -------------------------------------------------------------------------
@@ -107,7 +108,7 @@ export async function runDemo(): Promise<{ output: string; failures: number }> {
   check("it cannot read orders or change them: it holds no orders scope", (await agent.call("read_orders", { limit: 1 })).isError);
   check("9999 units is outside what the tool accepts", huge.isError);
   check("a sane proposal is recorded as proposed, waiting for a person", proposal.body.status === "proposed" && harbor.world.proposals[0]?.status === "proposed");
-  check("no tool approves a proposal, and the stock did not move", harbor.world.stock.shop_fernhill!.find((i) => i.sku === "MUG-01")!.onHand === 3);
+  check("nothing on offer approves a proposal", !(await agent.toolNames()).some((name) => /approve|execute|order/.test(name)));
   check("an agent cannot leave its shop", (await agent.call("read_stock", { tenantId: "shop_quayside" })).isError);
 
   // -------------------------------------------------------------------------

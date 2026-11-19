@@ -37,7 +37,16 @@ export interface OAuthConfig {
 }
 
 export interface GuardEvent {
-  type: "tool" | "auth_error" | "internal_error" | "audit_close_failed" | "config_warning";
+  type:
+    | "tool"
+    | "unauthorized"
+    | "rate_limited"
+    | "refused"
+    | "internal_error"
+    | "housekeeping_failed"
+    | "audit_close_failed"
+    | "audit_denied_failed"
+    | "config_warning";
   traceId?: string;
   message?: string;
   detail?: Record<string, unknown>;
@@ -70,7 +79,11 @@ export interface GuardConfig {
   maxActiveCredentialsPerUser?: number;
   now?: () => Date;
   newId?: () => string;
-  /** Receives structured events. Never receives arguments, results or tokens. */
+  /**
+   * Receives structured events. They never carry tool arguments, results or tokens. An
+   * `internal_error` carries the message of the error that was thrown, which is whatever your own
+   * code or driver put in it: treat this stream as an operator log, not as something to show users.
+   */
   onEvent?: (event: GuardEvent) => void;
 }
 

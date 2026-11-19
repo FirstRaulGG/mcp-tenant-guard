@@ -116,8 +116,6 @@ export interface OAuthStore {
   revokeFamily(familyId: string, at: Date): Promise<number>;
   /** Live and past connections of a user, newest first. */
   listGrants(userId: string): Promise<OAuthGrant[]>;
-  /** Same contract as `CredentialStore.revoke`. */
-  revokeGrant(id: string, userId: string, at: Date): Promise<RevokeResult>;
 }
 
 // ---------------------------------------------------------------------------

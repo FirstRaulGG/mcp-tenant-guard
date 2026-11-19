@@ -25,6 +25,8 @@ export interface ScopeDefinition {
   implies?: Readonly<Record<string, readonly string[]>>;
 }
 
+const RANK: Record<ScopeNature, number> = { read: 0, propose: 1, write: 2 };
+
 export function defineScopes(definition: ScopeDefinition): ScopeCatalog {
   const nature = new Map<string, ScopeNature>();
   for (const key of ["read", "propose", "write"] as const) {
@@ -40,6 +42,13 @@ export function defineScopes(definition: ScopeDefinition): ScopeCatalog {
   for (const [holder, satisfied] of Object.entries(definition.implies ?? {})) {
     for (const scope of [holder, ...satisfied]) {
       if (!nature.has(scope)) throw new Error(`implies refers to an unknown scope: ${scope}`);
+    }
+    for (const scope of satisfied) {
+      // Only downwards: a write may stand in for a read, never the reverse. Otherwise a read token
+      // would be a write token under another name.
+      if (RANK[nature.get(scope)!] > RANK[nature.get(holder)!]) {
+        throw new Error(`${holder} cannot imply the stronger scope ${scope}`);
+      }
     }
     implies.set(holder, satisfied);
   }
@@ -81,8 +90,18 @@ export function scopesOfNature(catalog: ScopeCatalog, scopes: readonly string[],
  * Proposals do not count as a change, because a person decides each one.
  */
 export function mixesReadAndWrite(catalog: ScopeCatalog, scopes: readonly string[]): boolean {
+  // Judged on what the scopes can DO: a write scope that also satisfies a read scope is the pair
+  // all by itself.
+  const effective = effectiveScopes(catalog, scopes);
   return (
-    scopesOfNature(catalog, scopes, "write").length > 0 &&
-    scopesOfNature(catalog, scopes, "read").length > 0
+    scopesOfNature(catalog, effective, "write").length > 0 &&
+    scopesOfNature(catalog, effective, "read").length > 0
   );
+}
+
+/** The scopes plus everything they imply. */
+export function effectiveScopes(catalog: ScopeCatalog, scopes: readonly string[]): string[] {
+  const all = new Set(scopes);
+  for (const scope of scopes) for (const implied of catalog.impliedBy(scope)) all.add(implied);
+  return catalog.all.filter((scope) => all.has(scope));
 }

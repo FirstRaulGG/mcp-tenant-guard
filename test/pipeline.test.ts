@@ -172,10 +172,10 @@ describe("the checks around a tool", () => {
     const h = harbor();
     const client = await connect(h, await ownerToken(h));
     await client.call("read_orders", { limit: 50 });
-    const events = JSON.stringify(h.events);
-    expect(events).toContain("read_orders");
-    expect(events).not.toContain("Wren");
-    expect(events).not.toContain("limit");
+    const toolEvents = h.events.filter((event) => event.type === "tool");
+    expect(toolEvents).toHaveLength(1);
+    expect(Object.keys(toolEvents[0]!.detail ?? {}).sort()).toEqual(["credentialId", "durationMs", "status", "tenantId", "tool", "userId"]);
+    expect(JSON.stringify(h.events)).not.toContain("Wren");
   });
 });
 

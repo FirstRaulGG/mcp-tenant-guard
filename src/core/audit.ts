@@ -40,20 +40,30 @@ export interface AuditStore {
 }
 
 export const MAX_AUDIT_PARAMS_BYTES = 2048;
+export const MAX_AUDIT_VALUE_BYTES = 256;
+
+function serializedBytes(value: unknown): number {
+  try {
+    return Buffer.byteLength(JSON.stringify(value) ?? "", "utf8");
+  } catch {
+    return -1;
+  }
+}
 
 /**
- * Parameters as they will be stored. Oversized or unserializable input is replaced by a marker;
- * this never throws, because an audit trail that fails on odd input stops calls for no reason.
+ * Parameters as they will be stored. Each value is judged alone: one that is oversized or cannot
+ * be serialized is replaced by a marker and the others are kept, so a caller cannot blank out the
+ * record ids of a call by padding another argument. This never throws, because an audit trail that
+ * fails on odd input stops calls for no reason.
  */
 export function auditParams(params: Record<string, unknown>): Record<string, unknown> {
-  let serialized: string;
-  try {
-    serialized = JSON.stringify(params);
-  } catch {
-    return { _truncated: true, bytes: -1 };
+  const stored: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(params)) {
+    const bytes = serializedBytes(value);
+    stored[key] = bytes < 0 || bytes > MAX_AUDIT_VALUE_BYTES ? { _truncated: true, bytes } : value;
   }
-  const bytes = Buffer.byteLength(serialized, "utf8");
-  return bytes > MAX_AUDIT_PARAMS_BYTES ? { _truncated: true, bytes } : params;
+  const total = serializedBytes(stored);
+  return total > MAX_AUDIT_PARAMS_BYTES ? { _truncated: true, bytes: total } : stored;
 }
 
 /** Picks the arguments a tool declared as loggable. Free text is logged only if the tool says so. */

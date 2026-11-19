@@ -15,7 +15,8 @@ import { parseScopes, scopesOfNature } from "../core/scopes.js";
 import { candidateHashes, classifyToken, hashToken, shouldTouchLastUsed, tokenUsability } from "../core/tokens.js";
 import type { Guard } from "./guard.js";
 
-const BEARER = /^Bearer ([^\s]+)$/;
+// The scheme name is case-insensitive (RFC 9110).
+const BEARER = /^Bearer ([^\s]+)$/i;
 
 export function bearerToken(header: string | null | undefined): string | null {
   return header ? (BEARER.exec(header.trim())?.[1] ?? null) : null;
@@ -68,7 +69,7 @@ async function authenticateCredential(guard: Guard, token: string, tokenClass: "
     }
     if (shouldTouchLastUsed(record.lastUsedAt, now)) await guard.credentials.touchLastUsed(record.id, now);
   } catch (err) {
-    guard.emit({ type: "auth_error", message: "credential housekeeping failed", detail: { error: String(err) } });
+    guard.emit({ type: "housekeeping_failed", message: "credential housekeeping failed", detail: { error: String(err) } });
   }
   return actor;
 }

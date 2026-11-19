@@ -1,6 +1,6 @@
 export type { Actor, ActorKind, Directory, DirectoryTenant, DirectoryUser, TenantRole } from "./core/actor.js";
 export { ACTOR_KINDS } from "./core/actor.js";
-export { MAX_AUDIT_PARAMS_BYTES, auditParams, pickLoggable } from "./core/audit.js";
+export { MAX_AUDIT_PARAMS_BYTES, MAX_AUDIT_VALUE_BYTES, auditParams, pickLoggable } from "./core/audit.js";
 export type { AuditEntry, AuditOutcome, AuditStore, NewAuditEntry } from "./core/audit.js";
 export { DEFAULT_LIMITS, MemoryRateLimiter } from "./core/limits.js";
 export type { GuardLimits, LimitCharge, LimitDecision, LimitRule, RateLimiter } from "./core/limits.js";
@@ -18,6 +18,7 @@ export type { ToolEffect, ToolHints, ToolResult, ToolStatus } from "./core/resul
 export {
   DEFAULT_TEXT_LIMIT,
   NOTICE_KEY,
+  TOO_DEEP,
   redactDigitRuns,
   redactEmails,
   redactPattern,
@@ -26,7 +27,7 @@ export {
   withDataNotice,
 } from "./core/sanitize.js";
 export type { Redactor, SanitizeOptions } from "./core/sanitize.js";
-export { defineScopes, hasScope, mixesReadAndWrite, parseScopes, scopesOfNature } from "./core/scopes.js";
+export { defineScopes, effectiveScopes, hasScope, mixesReadAndWrite, parseScopes, scopesOfNature } from "./core/scopes.js";
 export type { ScopeCatalog, ScopeDefinition, ScopeNature } from "./core/scopes.js";
 export { resolveTarget } from "./core/tenant.js";
 export type { AccessMode, Target, TargetDecision } from "./core/tenant.js";

@@ -14,6 +14,8 @@ export interface HarborOptions {
   /** Where the example is reachable. Default `http://localhost:8787`. */
   origin?: string;
   now?: () => Date;
+  /** How to find the caller's IP. Absent, requests are not limited before authentication. */
+  clientIp?: (request: Request) => string | null;
   overrides?: Partial<GuardConfig>;
 }
 
@@ -70,8 +72,9 @@ export function createHarbor(options: HarborOptions = {}): Harbor {
     version: "0.1.0",
     tools: harborTools(world, () => guard),
     instructions: (actor) => harborInstructions(actor.kind),
+    clientIp: options.clientIp,
   });
-  const oauth = createOAuthHandler(guard);
+  const oauth = createOAuthHandler(guard, { clientIp: options.clientIp });
 
   return {
     world,

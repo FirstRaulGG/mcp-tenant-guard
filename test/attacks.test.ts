@@ -123,8 +123,10 @@ describe("injection through data", () => {
     // A model that obeys the note finds that the tool is not there...
     const obeyed = await client.call("set_order_status", { orderId: "F-1001", status: "shipped" });
     expect(obeyed.isError).toBe(true);
-    // ...and nothing changed.
-    expect(h.world.orders[FERNHILL]!.find((o) => o.id === "F-1003")!.status).toBe("new");
+    // ...nothing changed...
+    expect(h.world.orders[FERNHILL]!.map((o) => o.status)).toEqual(["shipped", "packed", "new", "new"]);
+    // ...and the attempt is on the record.
+    expect(h.audit.entries.at(-1)).toMatchObject({ tool: "set_order_status", outcome: "denied", status: 403 });
   });
 
   it("lets an agent that obeys the note do nothing worse than leave a proposal for a person", async () => {
@@ -207,7 +209,7 @@ describe("the endpoint", () => {
   });
 
   it("stops a flood of made-up tokens before it reaches storage", async () => {
-    const h = harbor({ overrides: { limits: { anonymousPerIp: { limit: 3, windowMs: 60_000 } } } });
+    const h = harbor({ clientIp: () => "203.0.113.7", overrides: { limits: { anonymousPerIp: { limit: 3, windowMs: 60_000 } } } });
     let lookups = 0;
     h.credentials.findByHash = async () => {
       lookups += 1;

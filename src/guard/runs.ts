@@ -1,8 +1,9 @@
 // Runs: grouping what an unattended agent did into one piece of work.
 //
-// An agent opens a run, makes its calls, and closes it. Every audited call made in between carries
-// the run's id, so "what did the agent do last night" is one query. A run records work; it grants
-// nothing and restricts nothing.
+// An agent opens a run, makes its calls, and closes it. Audited calls made in later requests,
+// while the run is open, carry its id, so "what did the agent do last night" is one query. A run
+// records work; it grants nothing and restricts nothing. Its boundaries are whatever the agent
+// says they are: a run that is never closed keeps collecting calls until the next one starts.
 
 import { z } from "zod";
 
@@ -10,7 +11,7 @@ import { ToolError } from "../core/result.js";
 import { sanitizeText } from "../core/sanitize.js";
 import type { AgentRun } from "../store/types.js";
 import type { Guard } from "./guard.js";
-import { defineTool } from "./tool.js";
+import { defineTool, markBookkeeping } from "./tool.js";
 import type { AnyTool } from "./tool.js";
 
 const RUN_NOT_FOUND = "Run not found.";
@@ -44,9 +45,8 @@ export function runTools(guard: Guard): AnyTool[] {
     tenant: false,
     // A run belongs to one tenant and one agent, and only an agent credential is bound to both.
     actors: ["agent"],
-    // It changes only the guard's own records, and closes the previous run of the same agent.
-    effect: "overwrite",
-    access: "read",
+    // It changes only the guard's own records: see `markBookkeeping`.
+    effect: "write",
     audit: ["trigger", "clientRequestId"],
     async handler({ args, actor }) {
       const { agentName, tenantId } = actor;
@@ -85,7 +85,6 @@ export function runTools(guard: Guard): AnyTool[] {
     tenant: false,
     actors: ["agent"],
     effect: "write",
-    access: "read",
     // The summary is free text and stays out of the audit log.
     audit: ["runId", "status"],
     async handler({ args, actor }) {
@@ -101,7 +100,7 @@ export function runTools(guard: Guard): AnyTool[] {
     },
   });
 
-  return [startRun, endRun];
+  return [markBookkeeping(startRun), markBookkeeping(endRun)];
 }
 
 /** The id of the credential's open run, or null. A failed lookup never blocks the request. */

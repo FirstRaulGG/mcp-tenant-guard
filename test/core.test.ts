@@ -100,7 +100,9 @@ describe("scopes", () => {
   it("flags read with write, and nothing else", () => {
     expect(mixesReadAndWrite(catalog, ["orders:read", "orders:write"])).toBe(true);
     expect(mixesReadAndWrite(catalog, ["orders:read", "notes:read"])).toBe(false);
-    expect(mixesReadAndWrite(catalog, ["orders:write", "notes:write"])).toBe(false);
+    expect(mixesReadAndWrite(catalog, ["orders:write"])).toBe(false);
+    // This write scope also satisfies a read scope, so it is the pair by itself.
+    expect(mixesReadAndWrite(catalog, ["notes:write"])).toBe(true);
     // A proposal waits for a person, so it is not the dangerous half of the pair.
     expect(mixesReadAndWrite(catalog, ["orders:read", "stock:propose"])).toBe(false);
   });
@@ -165,10 +167,12 @@ describe("sanitizeLeaves and the notice", () => {
     expect(input.note).toBe("a\nb");
   });
 
-  it("stops at twelve levels instead of walking a graph", () => {
+  it("stops at twelve levels instead of walking a graph, and keeps what is above", () => {
     let deep: unknown = "leaf";
-    for (let i = 0; i < 20; i += 1) deep = { next: deep };
-    expect(JSON.stringify(sanitizeLeaves(deep))).not.toContain("leaf");
+    for (let i = 0; i < 20; i += 1) deep = { next: deep, level: i };
+    const text = JSON.stringify(sanitizeLeaves(deep));
+    expect(text).not.toContain("leaf");
+    expect(text).toContain('"level":19');
   });
 
   it("puts the notice first, where it is read before the data", () => {
@@ -210,12 +214,14 @@ describe("audit parameters", () => {
   });
 
   it("replaces oversized or unserializable parameters with a marker and never throws", () => {
-    const big = auditParams({ text: "x".repeat(MAX_AUDIT_PARAMS_BYTES) });
-    expect(big._truncated).toBe(true);
+    expect(auditParams({ text: "x".repeat(MAX_AUDIT_PARAMS_BYTES) }).text).toMatchObject({ _truncated: true });
     const cyclic: Record<string, unknown> = {};
     cyclic.self = cyclic;
-    expect(auditParams(cyclic)).toEqual({ _truncated: true, bytes: -1 });
+    expect(auditParams(cyclic)).toEqual({ self: { _truncated: true, bytes: -1 } });
     expect(auditParams({ a: 1 })).toEqual({ a: 1 });
+    // Many values that each fit can still be too much together.
+    const many = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`k${i}`, "v".repeat(200)]));
+    expect(auditParams(many)).toMatchObject({ _truncated: true });
   });
 });
 

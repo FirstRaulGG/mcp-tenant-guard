@@ -127,14 +127,6 @@ export class MemoryOAuthStore implements OAuthStore {
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
       .map((g) => ({ ...g }));
   }
-
-  async revokeGrant(id: string, userId: string, at: Date): Promise<RevokeResult> {
-    const grant = this.grants.find((g) => g.id === id && g.userId === userId);
-    if (!grant) return "not_found";
-    if (grant.revokedAt) return "already_revoked";
-    grant.revokedAt = at;
-    return "revoked";
-  }
 }
 
 export class MemoryAuditStore implements AuditStore {

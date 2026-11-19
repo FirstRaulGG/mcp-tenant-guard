@@ -28,7 +28,7 @@ The demo plays eight scenes against an example server, in-process, with no netwo
 
 ## Status
 
-Early, and not yet run in production in this form. The logic is covered by tests that drive the real MCP protocol through the SDK's client against in-memory storage. It has not been exercised against Claude, ChatGPT or any other hosted MCP client, and no storage adapter for a real database ships with it: you implement four small interfaces. It has had no outside security review. Read the [limits](#limits) before relying on it.
+Early, and not yet run in production in this form. The logic is covered by tests that drive the real MCP protocol through the SDK's client against in-memory storage. It has not been exercised against Claude, ChatGPT or any other hosted MCP client, and no storage adapter for a real database ships with it: you implement the storage interfaces yourself. It has had one adversarial review, by an AI reviewer, whose findings are fixed or listed under [limits](#limits); it has had no review by an outside security professional. Read the limits before relying on it.
 
 ## The idea
 
@@ -37,7 +37,7 @@ Early, and not yet run in production in this form. The logic is covered by tests
 So the library does not depend on the model resisting. It arranges things so that an obedient model still cannot do damage:
 
 - the credential that reads outside text usually cannot write at all, and issuing one that does both takes a deliberate confirmation;
-- the tenant of every call is decided by code, from the credential, never by the model's choice of id alone;
+- the tenant of every call is checked by code against the credential, never taken on the model's word;
 - an unattended agent can propose, and a person approves;
 - everything that was read, changed or refused is on record.
 
@@ -84,7 +84,7 @@ Missing header, malformed token, unknown, revoked, expired, suspended owner, fea
 A tool author writes the data access. Everything else is declared and enforced by [`guard/tool.ts`](src/guard/tool.ts), in a fixed order:
 
 ```
-budget -> visibility -> scope -> cost -> tenant -> audit (open) -> handler -> sanitize -> size -> audit (close)
+budget -> arguments -> visibility -> scope -> cost -> tenant -> audit (open) -> handler -> sanitize -> size -> audit (close)
 ```
 
 ```ts
@@ -104,20 +104,25 @@ const readOrders = defineTool({
 ```
 
 - **A tool the actor cannot use is not listed.** It is also refused if called anyway; the list is a courtesy, the check is the control.
-- **A write tool cannot sit behind a read scope.** The server refuses to start.
-- **The audit row is written before the data is read.** If it cannot be written, the call does not run.
-- **Refused calls are recorded too**, with the tenant that was asked for.
-- **Only declared arguments are logged.** Results never are.
-- **A result that is too large is refused, not cut.** Half a JSON list with no sign that it is half is worse than an error that says "ask for less".
+- **A tool's effect decides the scope it needs.** A tool declared as a write cannot sit behind a read scope, and a tool with no scope cannot be anything but a read. The server refuses to start otherwise.
+- **The audit row is written before the handler runs.** If it cannot be written, the handler does not run.
+- **Refused calls are recorded too**: a missing scope, a wrong tenant, invalid arguments, a spent limit, and a call to a tool the credential was never offered, each with the tenant that was asked for. Failed authentication is reported as an event, since there is nobody to attribute a row to.
+- **Only declared arguments are logged**, each cut off on its own if oversized. Results never are.
+- **A result that is too large is refused, not cut.** Half a JSON list with no sign that it is half is worse than an error that says "ask for less". Single strings are a different matter: they are shortened to a limit you set, with an ellipsis.
+- **A handler does not start once time is up**, and one that outlives the budget is abandoned without taking the process down with it.
 - **An unexpected failure returns a reference id.** The detail goes to your logs, not to the model.
+
+What the wrapper cannot do is check that a tool told the truth. A tool declared as a read that writes anyway, or a handler that ignores the tenant it was handed and queries another, is not caught. Declarations are a few lines each so that a person can review them.
 
 ### Tool output
 
-Every string in every result goes through [`core/sanitize.ts`](src/core/sanitize.ts): line breaks become spaces, invisible and direction-changing characters are removed, backticks and forged delimiters are defused, your redactors run, and then the text is cut to length. Results that contain outside text open with a notice naming the fields, placed first so it is read before the data.
+Every string in every result, keys included, goes through [`core/sanitize.ts`](src/core/sanitize.ts). Look-alike forms are folded to the plain ones; line breaks become spaces; everything invisible is removed (control and format characters, bidirectional overrides, variation selectors, the "tag" block used to smuggle ASCII); backticks, tilde fences and angle brackets are replaced so that nothing can pose as a code fence or a markup tag; your redactors run; and then the text is cut to length. Results that contain outside text open with a notice naming the fields, written first so it is read before the data, and the data cannot supply a notice of its own.
+
+This removes disguises, not meaning. A sentence that says "ignore your instructions" is still there afterwards, and so is any delimiter made of ordinary letters and square brackets.
 
 ### Agents propose, people approve
 
-An agent's scopes come from a table in your code, never from the request that issues its token, and the guard will not start if that table gives an agent a write scope. A proposal tool creates a record for a person to decide. The example has no tool that approves one, on purpose. Agent calls can be grouped into runs, and every audited call carries the run's id.
+An agent's scopes come from a table in your code, never from the request that issues its token, and the guard will not start if that table gives an agent a write scope. A proposal tool creates a record for a person to decide. The example has no tool that approves one, on purpose. Agent calls can be grouped into runs: audited calls made in later requests while a run is open carry its id. The agent decides where a run starts and ends, so a run is a label for reading the log, not evidence.
 
 ### OAuth for public clients
 
@@ -126,11 +131,11 @@ A small OAuth 2.1 authorization server in [`oauth/server.ts`](src/oauth/server.t
 - discovery metadata (RFC 9728, RFC 8414) and dynamic client registration, public clients only;
 - redirect URIs checked against an allowlist on the parsed URL, never by prefix;
 - PKCE with S256 on every flow, one resource per token (RFC 8707), `iss` in the response (RFC 9207);
-- authorization codes that are hashed, single-use and five minutes long; a code presented twice revokes the tokens issued from it;
-- refresh token rotation with reuse detection: a rotated refresh token that comes back revokes every token of that sign-in;
+- authorization codes that are hashed, single-use and five minutes long; a used code that comes back with the right verifier revokes the tokens issued from it;
+- refresh token rotation with reuse detection: a rotated refresh token that comes back revokes every token of that sign-in, including when the "thief" is the real client retrying after a lost response;
 - a switch that turns the feature off *and* stops tokens that were already issued.
 
-The consent screen is yours to build, behind your own session. The library validates the request, tells you which host will receive the code, and re-checks everything when you call `approveAuthorization`.
+The consent screen is yours to build, behind your own session, with your own CSRF protection. The library validates the request, tells you which host will receive the code, and when you call `approveAuthorization` checks again that the client owns the redirect URI, that the person may hold each scope, and that no scope goes beyond what the client asked for. It trusts one thing from you completely: the `userId` you pass. Take it from your session, never from the request.
 
 ## Using it
 
@@ -152,9 +157,11 @@ const mcp = createMcpHandler(guard, { name: "acme", version: "1.0.0", tools: [re
 
 The package is not published to npm. Work from a clone.
 
-You provide four things, all defined in [`store/types.ts`](src/store/types.ts) and [`core/actor.ts`](src/core/actor.ts): a `Directory` (who exists, who belongs where), a `CredentialStore`, an `AuditStore`, and an `OAuthStore` if you use OAuth. The in-memory versions in [`store/memory.ts`](src/store/memory.ts) are the reference. Several methods are compare-and-swap ("only if still unused"); that is the part an adapter has to get right.
+You provide the storage, defined in [`store/types.ts`](src/store/types.ts) and [`core/actor.ts`](src/core/actor.ts): a `Directory` (who exists, who belongs where), a `CredentialStore` and an `AuditStore`, plus an `OAuthStore` if you use OAuth, a `RunStore` if you use runs, and a shared `RateLimiter` if you run more than one instance. The in-memory versions in [`store/memory.ts`](src/store/memory.ts) are the reference. Several methods are compare-and-swap ("only if still unused"); that is the part an adapter has to get right, and there is no conformance suite yet to check yours.
 
-Issuing, listing and revoking tokens is done with `issueCredential`, `listCredentials` and `revokeCredential`, called from your own signed-in pages. A token is never accepted as proof of identity for issuing another.
+Pass `clientIp` to the handlers, or there is no rate limit before authentication. `forwardedIp(n)` builds it from `X-Forwarded-For` for `n` proxies of your own.
+
+Issuing, listing and revoking tokens is done with `issueCredential`, `listCredentials` and `revokeCredential`, called from your own signed-in pages with the `userId` of your session. Do not expose them to a caller who authenticated with a token: a credential that can mint credentials cannot be contained.
 
 ### Try it with a real client
 
@@ -170,27 +177,37 @@ What is defended, and by what.
 
 | Threat | Defence |
 | --- | --- |
-| One tenant's credential reads another tenant | Tenant resolved by code per call; owners and agents are bound to one |
+| An owner's or agent's credential reads another tenant | Bound to one tenant; any other is refused |
 | An advisor reads a customer they are not assigned to | Assignment checked on every call; indistinguishable from "does not exist" |
+| Text in one customer's data sends an advisor's model to another customer | **Not defended.** See limits |
 | Text in the data instructs the model to change something | Read credentials have no write tools; read-and-write needs explicit confirmation; agents can only propose |
-| Text in the data poses as system text | Line breaks, code fences, delimiters and hidden characters removed; result labelled |
+| Text in the data poses as system text | Line breaks, invisible characters, code fences and angle brackets removed; result labelled |
 | A stolen token keeps working after the person leaves | Authorization re-derived on every request |
 | A stolen refresh token | Rotation with reuse detection revokes the family |
-| A stolen copy of the token table | Tokens stored as peppered HMACs |
+| A stolen copy of the token table | Tokens are 256 random bits and only their hash is stored; the pepper adds a second secret the thief also needs |
 | Guessing or flooding tokens | 256-bit tokens, uniform 401, limits before any lookup |
 | An authorization code sent to an attacker's site | Redirect allowlist on parsed URLs, PKCE, no redirect to an unverified URI |
-| A tool author forgets a check | Checks live in one wrapper the tool cannot skip; mismatched scopes fail at start-up |
-| "Who read this?" has no answer | Audit row before every read; refusals recorded; rows outlive tokens and users |
+| A tool author forgets a check | Checks live in one wrapper around every handler; a scope that does not match the declared effect fails at start-up |
+| "Who read this?" has no answer | Audit row before every handler runs; refusals recorded; rows outlive tokens and users |
 | An agent loops and burns the budget | Cost-weighted limits per credential and per person, charged all-or-nothing |
 
 ## Limits
 
 - **An instruction in the data still reaches the model.** Cleaning changes its shape, not its words. A credential that both reads outside text and writes can be talked into the write. The confirmation at issue is a warning, not a barrier.
+- **An advisor's credential spans tenants, and so does the model using it.** Text planted in one customer's data can tell the model to read another customer the advisor is assigned to, or to carry something from one to the other. Nothing here pins a conversation to one tenant. Give advisors read-only tokens, or one token per customer where it matters.
+- **The guard picks the tenant; your query has to use it.** A handler receives `target.tenantId` and is trusted to filter by it. A handler that queries by an id from its arguments instead has undone everything above.
+- **A tool's declaration is trusted.** See "One path for every tool call".
+- **Cleaning has a price.** Joined emoji and a few scripts lose their zero-width joiners, `<` and `>` come out as other brackets, and long text is shortened. Raise the limit or use `keepLines` where that matters.
 - **Exfiltration through the model is out of scope.** If the model can also browse or call other tools, data read here can leave through them. That is decided by the client, not by this server.
 - **The proposal is only as safe as its review.** A person who approves without reading has turned "propose" into "write".
 - **Redactors are blunt and yours to choose.** They run on every string, including identifiers. The built-in ones cover e-mail addresses and long digit runs and nothing else. This is not a PII detector.
 - **The in-memory rate limiter counts per process.** Behind several instances the effective limit is multiplied. Use a shared store.
-- **The client IP is yours to supply.** Without `clientIp`, every caller shares one pre-authentication bucket.
+- **The client IP is yours to supply.** Without `clientIp` there is no limit before authentication on the MCP endpoint, and one shared bucket on the token and registration endpoints, which a single caller can exhaust. Clients hosted by a model provider share its outgoing addresses, and so share a bucket.
+- **An OAuth connection gets a new credential id on every refresh**, so its per-credential limits start over each time. The per-person cost limit does not.
+- **The audit log is as trustworthy as its store.** Rows are not chained or signed.
+- **No pepper rotation.** Changing the pepper invalidates every token.
+- **No revocation endpoint, no CORS.** A client cannot revoke its own token (RFC 7009), and a browser-based client's preflight is answered with 405.
+- **Refresh tokens slide.** Each rotation starts a new 90 days; there is no absolute end to a sign-in other than revoking it.
 - **A timeout does not cancel the work.** The model is told the call took too long; a write that was in flight may still complete.
 - **Tokens are opaque and looked up on every request.** That is what makes revocation immediate, and it costs a few reads per call. There is no cache.
 - **No cleanup job.** Expired codes, grants and unused clients stay in your store until you delete them.
