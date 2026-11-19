@@ -1,0 +1,58 @@
+{
+  "name": "mcp-tenant-guard",
+  "version": "0.1.0",
+  "description": "Guardrails for exposing multi-tenant business data to AI agents over MCP: scoped tokens, tenant resolution, OAuth, audit log and injection-aware tool output.",
+  "license": "MIT",
+  "author": "Raul Gomes",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/FirstRaulGG/mcp-tenant-guard.git"
+  },
+  "homepage": "https://github.com/FirstRaulGG/mcp-tenant-guard#readme",
+  "bugs": {
+    "url": "https://github.com/FirstRaulGG/mcp-tenant-guard/issues"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "demo": "tsx src/demo.ts",
+    "example": "tsx src/example/serve.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "check": "npm run lint && npm run typecheck && npm run test"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "multi-tenant",
+    "oauth",
+    "guardrails",
+    "prompt-injection",
+    "audit-log",
+    "ai-agents"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.6.6",
+    "eslint": "^10.15.0",
+    "tsx": "^4.23.15",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.73.0",
+    "vitest": "^5.1.1"
+  }
+}
