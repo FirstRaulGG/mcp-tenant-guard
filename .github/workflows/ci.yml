@@ -26,3 +26,25 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: node dist/demo.js
+
+  # A client from another codebase (the Python MCP SDK) against the example server, over HTTP.
+  interop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Start the example server
+        run: |
+          node dist/example/serve.js > harbor.log &
+          for i in $(seq 1 30); do grep -q "speaks OAuth" harbor.log && break; sleep 1; done
+          cat harbor.log | head -3
+      - name: Run the Python client against it
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --quiet mcp==2.3.0
+          .venv/bin/python interop/python_client.py harbor.log

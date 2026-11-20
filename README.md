@@ -28,7 +28,7 @@ The demo plays eight scenes against an example server, in-process, with no netwo
 
 ## Status
 
-Early, and not yet run in production in this form. The logic is covered by tests that drive the real MCP protocol through the SDK's client against in-memory storage. It has not been exercised against Claude, ChatGPT or any other hosted MCP client, and no storage adapter for a real database ships with it: you implement the storage interfaces yourself. It has had one adversarial review, by an AI reviewer, whose findings are fixed or listed under [limits](#limits); it has had no review by an outside security professional. Read the limits before relying on it.
+Early, and not yet run in production in this form. The logic is covered by tests that drive the real MCP protocol through the SDK's client against in-memory storage. The example server has also been driven over HTTP by the Python MCP SDK's client (2.3.0), which is written independently of the TypeScript SDK the server is built on: token authentication and the whole OAuth flow pass, and CI repeats that check on every push ([`interop/`](interop/python_client.py)). It has not been exercised against Claude, ChatGPT or any other hosted MCP client, which need a public URL and their own allowlisted redirect URIs, and no storage adapter for a real database ships with it: you implement the storage interfaces yourself. It has had one adversarial review, by an AI reviewer, whose findings are fixed or listed under [limits](#limits); it has had no review by an outside security professional. Read the limits before relying on it.
 
 ## The idea
 
@@ -170,6 +170,14 @@ npm run example
 ```
 
 starts the example on `http://localhost:8787` and prints three tokens. Its consent page lets you pick who you are from a list, because the example has no login. Do not copy that part.
+
+To check it against a client from another codebase, [`interop/python_client.py`](interop/python_client.py) connects with the Python MCP SDK: once with a token, once with no token at all, signing in through OAuth the way a hosted client would.
+
+```
+npm run example > harbor.log &
+pip install mcp==2.3.0
+python interop/python_client.py harbor.log
+```
 
 ## Threat model
 
